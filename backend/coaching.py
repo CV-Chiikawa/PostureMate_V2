@@ -3,6 +3,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import unicodedata
 from dataclasses import dataclass, field
 
 import httpx
@@ -12,9 +14,34 @@ SOLAR_URL = "https://api.upstage.ai/v1/chat/completions"
 TIMEOUT = 5.0
 COOLDOWN = 30.0
 SYSTEM_PROMPT = (
-    "자세 연습 화면에 관찰 문장이 이미 표시됩니다. 이 관찰에 맞는 행동 하나만 ‘~세요’로 끝나는 짧은 한 문장으로 쓰세요. "
-    "관찰을 되풀이하거나 새로운 자세 문제, 거리, 각도, 진단을 추가하지 마세요."
+    "사용자가 연습을 이어가면서 바로 해볼 행동 하나를 안내하세요. 화면에 이미 나온 관찰은 반복하지 마세요. "
+    "관찰과 metrics에서 가장 관련 있는 신체 부위 하나를 골라, 그 부위를 움직일 방향이나 스스로 확인할 위치를 짚으세요. "
+    "서로 다른 동작을 나열하거나 여러 부위에 힘을 주고 고정하도록 지시하지 마세요. "
+    "severity와 duration_sec를 함께 고려하세요. 방금 감지된 주의에는 작은 조정을, "
+    "같은 변화가 지속된 경고에는 자세를 다시 잡을 수 있는 단서를 주세요. 단계 이름이나 경과 시간은 낭독하지 말고 동작부터 안내하세요. "
+    "감지되지 않은 문제, 좌우 방향, 주변 사물이나 수치 목표를 추측하지 마세요. "
+    "한국어 존댓말로 ‘~세요’로 끝나는 짧은 한 문장만 답하세요."
 )
+MODE_CONTEXT = {
+    "neck": "개인 기준 자세와 비교하는 거북목 연습",
+    "interview": "앉아서 답변하는 모의면접. 손 위치는 선택한 rubric을 따릅니다(A: 무릎 가운데, B: 각 손과 같은 쪽 무릎).",
+    "presentation": "서서 말하는 발표 연습. 자연스러운 이동은 허용합니다.",
+}
+REFERENCE_POINTS = {
+    "head_forward": "귀와 어깨의 앞뒤 위치",
+    "head_lower": "눈높이와 시선",
+    "head_tilt": "양쪽 귀의 높이",
+    "head_offset": "코와 양쪽 어깨의 중앙선",
+    "face_size": "기준 구도에서 보였던 얼굴과 어깨의 상대 크기",
+    "neck_angle": "귀와 같은 쪽 어깨의 위치",
+    "shoulder_height_difference": "양쪽 어깨 끝의 높이",
+    "torso_lean": "어깨 중심과 골반 중심",
+    "body_sway": "몸무게가 양발에 실리는 감각",
+    "knees_apart": "양쪽 무릎 안쪽의 간격",
+    "knees_close": "각 발과 같은 쪽 무릎의 위치",
+    "hands_off_center": "두 무릎 사이의 중간점과 손목 위치",
+    "hands_off_knees": "각 손목과 같은 쪽 무릎의 위치",
+}
 logger = logging.getLogger(__name__)
 
 FEEDBACK = {
@@ -43,11 +70,21 @@ def fixed_hint(event):
     return " ".join(feedback_for(event))
 
 
+def action_key(text):
+    compact = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", text))
+    core = re.sub(r"가볍게|살짝|조금|천천히|부드럽게|(?:주세요|보세요|주십시오|보십시오)$", "", compact)
+    # A generic goal adds no practical cue to an otherwise identical movement.
+    return re.sub(r"(?:머리를|고개를|몸을|상체를)?(?:기준|바른|원래)자세(?:에맞춰|로돌아가|로돌아와|를유지해)$", "", core)
+
+
 async def solar_message(client, key, event, deadline):
     """Return only a timely, usable message; the fixed hint is already on screen."""
     facts = {k: event[k] for k in ("mode", "rubric", "type", "severity", "duration_sec", "metrics")}
-    observation, action = feedback_for(event)
-    prompt = f"{SYSTEM_PROMPT}\n화면의 관찰 문장: {observation}\n권장 행동 예시: {action}"
+    observation, default_action = feedback_for(event)
+    issue = event["metrics"].get("observation") or event["type"]
+    reference = REFERENCE_POINTS.get(issue, "개인 기준 자세와 현재 감지된 부위의 위치")
+    prompt = (f"{SYSTEM_PROMPT}\n연습 상황: {MODE_CONTEXT[event['mode']]}\n화면의 관찰: {observation}"
+              f"\n사용자가 직접 확인할 단서: {reference}. 이 단서를 동작 속에 자연스럽게 담으세요.")
     try:
         async with asyncio.timeout_at(deadline):
             response = await client.post(SOLAR_URL, headers={"Authorization": f"Bearer {key}"},
@@ -64,6 +101,8 @@ async def solar_message(client, key, event, deadline):
             sentence = advice.removesuffix(".")
             if (len(advice) > 100 or not sentence.endswith(("세요", "십시오"))
                     or any(mark in sentence for mark in ".!?\n")):
+                return None
+            if action_key(sentence) == action_key(default_action):
                 return None
             return f"{observation} {sentence}."
     except (TimeoutError, httpx.HTTPError, ValueError, LookupError, TypeError, AttributeError) as exc:

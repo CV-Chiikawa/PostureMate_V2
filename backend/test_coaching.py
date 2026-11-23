@@ -157,6 +157,7 @@ class NeckCoachingTests(unittest.IsolatedAsyncioTestCase):
         observation = "머리가 기준 자세보다 앞으로 나와 있습니다."
         self.assertTrue(start["coaching"]["message"].startswith(observation))
         self.assertIn(observation, body["messages"][0]["content"])
+        self.assertNotIn("턱을 가볍게 당겨 주세요", req.content.decode())
         self.assertIsNone((await self.frame())["coaching"])
         self.release.set()
         await asyncio.wait_for(self.finished.wait(), 1)
@@ -263,6 +264,24 @@ class NeckCoachingTests(unittest.IsolatedAsyncioTestCase):
             delivered = await self.until(lambda d: (d["coaching"] or {}).get("source") == "solar", mode=mode, session=mode)
             self.assertEqual(delivered["coaching"]["event_id"], packet["event"]["event_id"])
         self.assertEqual(len(self.calls), 2)
+
+    async def test_solar_echo_does_not_relabel_default_coaching(self):
+        self.release.set()
+        for index, answer in enumerate([
+            "턱을 가볍게 당겨 주세요.",
+            "턱을 가볍게 당겨주세요",
+            "턱을 살짝 당겨 보세요.",
+            "턱을 살짝 당겨 머리를 기준 자세에 맞춰 보세요.",
+        ]):
+            with self.subTest(answer=answer):
+                self.body = {"choices": [{"message": {"content": answer}}]}
+                self.finished.clear()
+                session = f"echo-{index}"
+                packet = await self.caution(session=session)
+                self.assertEqual(packet["coaching"]["source"], "fallback")
+                await asyncio.wait_for(self.finished.wait(), 1)
+                self.assertIsNone((await self.frame(session=session))["coaching"])
+        self.assertEqual(len(self.calls), 4)
 
     async def test_missing_key_keeps_frame_and_default_coaching(self):
         with patch.dict("os.environ", {"UPSTAGE_API_KEY": ""}):

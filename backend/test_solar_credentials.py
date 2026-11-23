@@ -30,7 +30,7 @@ class CredentialTests(unittest.IsolatedAsyncioTestCase):
 
         def upstream(request):
             authorized.append(request.headers.get("Authorization") == "Bearer " + sample)
-            return httpx.Response(200, json={"choices":[{"message":{"content":"무릎 사이를 조금 벌려 주세요."}}]})
+            return httpx.Response(200, json={"choices":[{"message":{"content":"두 발을 바닥에 둔 채 무릎 사이에 여유를 만들어 주세요."}}]})
 
         app.state.solar = await self.enterAsyncContext(httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
         client = await self.enterAsyncContext(httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://local"))
