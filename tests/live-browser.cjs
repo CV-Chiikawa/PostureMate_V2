@@ -41,6 +41,7 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright-core");
       }
       assert.equal(payload.measurement_status,"unavailable");
       await page.getByRole("heading",{name:"자세 측정 불가"}).waitFor();
+      assert.match(await page.locator(".coaching-panel blockquote p").innerText(), /^\[기본 안내\] /);
       if (mode === "거북목 방지") {
         assert.match(await page.locator(".preview").innerText(), /5초/);
         await page.locator(".coaching-panel blockquote").filter({hasText:/얼굴.*어깨/}).waitFor({timeout:12000});
@@ -115,34 +116,49 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright-core");
           firstFrame = false;
           return route.fulfill({json:packet});
         });
-        await panel.getByText(normal, {exact:true}).waitFor();
+        await panel.getByText(`[기본 안내] ${normal}`, {exact:true}).waitFor();
+        // Timestamp the rendered text changes, independently of Playwright's polling interval.
+        await page.evaluate(({basic, generated}) => {
+          const times = window.coachingTimes = {};
+          const observer = new MutationObserver(() => {
+            const text = document.querySelector(".coaching-panel blockquote p")?.textContent;
+            if (text === basic && times.basic === undefined) times.basic = performance.now();
+            if (text === generated) {
+              times.generated = performance.now();
+              observer.disconnect();
+            }
+          });
+          observer.observe(document.querySelector(".status-stack"), {subtree:true, childList:true, characterData:true});
+        }, {basic:`[기본 안내] ${basic}`, generated:`[SOLAR 응답] ${generated}`});
         state = "WARNING";
         await page.getByRole("heading",{name:"자세 교정이 필요합니다"}).waitFor();
-        assert.equal(await panel.locator("blockquote p").innerText(), basic, "Confirmed warning must replace normal coaching immediately");
-        const started = await page.evaluate(() => performance.now());
+        const body = panel.locator("blockquote p");
+        assert.equal(await body.innerText(), `[기본 안내] ${basic}`, "Confirmed warning must replace normal coaching immediately");
         solar = true;
-        await panel.getByText(generated, {exact:true}).waitFor({timeout:12000});
-        const readableMs = (await page.evaluate(() => performance.now())) - started;
-        assert.ok(readableMs >= 7650, `Fallback replaced after ${Math.round(readableMs)} ms`);
-        assert.equal(await panel.locator(".eyebrow").innerText(), "SOLAR 코칭");
+        await page.waitForResponse(r => r.url().endsWith("/process-frame"));
+        assert.equal(await body.innerText(), `[기본 안내] ${basic}`);
+        await panel.getByText(`[SOLAR 응답] ${generated}`, {exact:true}).waitFor({timeout:12000});
+        const readableMs = await page.evaluate(() => window.coachingTimes.generated - window.coachingTimes.basic);
+        assert.ok(readableMs >= 7950, `Fallback replaced after ${Math.round(readableMs)} ms`);
         // Only one frame carries the new event. The status remains WARNING.
         solar = false;
         event = {...event, event_id:"tilt-guide", metrics:{neck_score:4, observation:"head_tilt"}};
         hint = tilted;
         firstFrame = true;
-        await panel.getByText(tilted, {exact:true}).waitFor({timeout:1800});
+        await panel.getByText(`[기본 안내] ${tilted}`, {exact:true}).waitFor({timeout:1800});
         state = "RECOVERED";
         await page.getByRole("heading",{name:"정상 자세로 돌아왔습니다"}).waitFor();
-        assert.equal(await panel.locator("blockquote p").innerText(), "자세가 기준 범위로 돌아왔습니다.");
+        assert.equal(await body.innerText(), "[기본 안내] 자세가 기준 범위로 돌아왔습니다.");
         await page.unroute(routePattern);
         await page.getByRole("heading",{name:"자세 측정 불가"}).waitFor();
-        assert.doesNotMatch(await panel.innerText(), /SOLAR 코칭/);
+        assert.match(await body.innerText(), /^\[기본 안내\] /);
         console.log("Warning, new observation and recovery match the coaching card; same-event Solar reading time PASS");
       }
       await button("일시정지").click();
       await button("계속하기").click();
       await button("분석 종료").click();
       const recoveries = mode === "거북목 방지" ? 1 : 0;
+      assert.equal(await page.locator(".result-coaching blockquote").innerText(), "[기본 안내] 이번 세션이 끝났습니다.");
       assert.match(await page.locator(".result-overview").innerText(),new RegExp(`정상 복귀\\s+${recoveries}회`));
       assert.equal(await page.locator("video").evaluate(v=>v.srcObject),null);
       console.log(mode, payload.analysis_source, payload.measurement_status, "PASS");

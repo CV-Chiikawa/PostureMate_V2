@@ -17,8 +17,11 @@ function CoachingPanel({ label, message }) {
 
   return (
     <section className="panel coaching-panel">
-      <div className="panel-heading"><div><span className="eyebrow">{shown.label}</span><h2>최근 연습 안내</h2></div></div>
-      <blockquote><span aria-hidden="true">“</span><p aria-live="polite">{shown.message}</p></blockquote>
+      <div className="panel-heading"><h2>최근 연습 안내</h2></div>
+      <blockquote>
+        <span aria-hidden="true">“</span>
+        <p aria-live="polite" aria-atomic="true"><strong>[{shown.label}]</strong> {shown.message}</p>
+      </blockquote>
     </section>
   );
 }
