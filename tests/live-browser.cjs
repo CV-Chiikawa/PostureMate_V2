@@ -81,6 +81,8 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright-core");
       assert.deepEqual(await page.evaluate(() => Array.from(window.seenPostures)), ["자세 측정 불가"]);
       stable = true;
       await page.getByRole("heading",{name:"정상 자세"}).waitFor();
+      // Supply three seconds of continuous measurement for the final report.
+      if (mode !== "모의면접") await page.waitForTimeout(3200);
       await page.evaluate(() => window.postureObserver.disconnect());
       await page.unroute(routePattern);
       await page.getByRole("heading",{name:"자세 측정 불가"}).waitFor();
@@ -105,12 +107,14 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright-core");
           severity:"warning", started_at:0, duration_sec:2, confidence:1, metrics:{neck_score:4}};
         let firstFrame = true;
         let solar = false;
+        let solarSent = false;
         let state = "NORMAL";
         let hint = basic;
         await page.route(routePattern, route => {
           if (state !== "WARNING") return route.fulfill({json:{...nextResult, state}});
-          const coaching = firstFrame || solar
+          const coaching = firstFrame || (solar && !solarSent)
             ? {event_id:event.event_id, source:solar ? "solar" : "fallback", message:solar ? generated : hint} : null;
+          if (solar) solarSent = true;
           const packet = {...nextResult, state, features:{...values, neck_score:4, neck_level:"BAD"},
             event:firstFrame ? event : null, coaching};
           firstFrame = false;
@@ -135,11 +139,10 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright-core");
         const body = panel.locator("blockquote p");
         assert.equal(await body.innerText(), `[기본 안내] ${basic}`, "Confirmed warning must replace normal coaching immediately");
         solar = true;
-        await page.waitForResponse(r => r.url().endsWith("/process-frame"));
-        assert.equal(await body.innerText(), `[기본 안내] ${basic}`);
-        await panel.getByText(`[SOLAR 응답] ${generated}`, {exact:true}).waitFor({timeout:12000});
+        await panel.getByText(`[SOLAR 응답] ${generated}`, {exact:true}).waitFor({timeout:3000});
         const readableMs = await page.evaluate(() => window.coachingTimes.generated - window.coachingTimes.basic);
-        assert.ok(readableMs >= 7950, `Fallback replaced after ${Math.round(readableMs)} ms`);
+        assert.ok(readableMs >= 950 && readableMs < 3000, `Fallback replaced after ${Math.round(readableMs)} ms`);
+        console.log(`Same-event Solar visible after ${Math.round(readableMs)} ms of fallback`);
         // Only one frame carries the new event. The status remains WARNING.
         solar = false;
         event = {...event, event_id:"tilt-guide", metrics:{neck_score:4, observation:"head_tilt"}};
@@ -156,9 +159,35 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright-core");
       }
       await button("일시정지").click();
       await button("계속하기").click();
+      let summaryRequests = 0;
+      const summaryText = "머리가 앞으로 나오는 변화가 관찰됐고 기준 자세로 한 번 돌아왔습니다. 다음에는 귀와 어깨 위치를 확인해 보세요.";
+      await page.route("**/session-feedback", async route => {
+        summaryRequests++;
+        const facts = route.request().postDataJSON();
+        assert.equal(facts.mode, payload.context.mode);
+        assert.ok(facts.measured_seconds >= 3);
+        if (mode === "거북목 방지") {
+          assert.equal(facts.recovered, 1);
+          assert.equal(facts.observations.head_tilt, 1);
+          return route.fulfill({json:{source:"solar", message:summaryText}});
+        }
+        return route.fulfill({status:503, json:{}});
+      });
       await button("분석 종료").click();
       const recoveries = mode === "거북목 방지" ? 1 : 0;
-      assert.equal(await page.locator(".result-coaching blockquote").innerText(), "[기본 안내] 이번 세션이 끝났습니다.");
+      const resultCard = page.locator(".result-coaching");
+      if (mode === "거북목 방지") {
+        await resultCard.getByText(summaryText, {exact:true}).waitFor();
+        assert.match(await resultCard.innerText(), /SOLAR 종합 피드백/);
+        assert.match(await page.locator(".result-coaching").innerText(), /주의·경고 안내 2건 중 SOLAR 응답 1건/);
+      } else if (mode === "모의면접") {
+        await resultCard.getByText(/측정 시간이 짧아/).waitFor();
+        assert.match(await page.locator(".result-coaching").innerText(), /표시된 주의·경고 안내가 없습니다/);
+      } else {
+        await resultCard.getByText(/SOLAR에 연결할 수 없어/).waitFor();
+      }
+      assert.equal(summaryRequests, mode === "모의면접" ? 0 : 1);
+      await page.unroute("**/session-feedback");
       assert.match(await page.locator(".result-overview").innerText(),new RegExp(`정상 복귀\\s+${recoveries}회`));
       assert.equal(await page.locator("video").evaluate(v=>v.srcObject),null);
       console.log(mode, payload.analysis_source, payload.measurement_status, "PASS");

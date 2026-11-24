@@ -1,6 +1,21 @@
 import { ANALYSIS_API_BASE_URL, FRAME_SAMPLING } from "../config/frameSampling";
 import { adaptAnalysisResponse } from "./AnalysisResponseAdapter";
 
+export async function requestSessionFeedback(facts, signal) {
+  if (facts.measured_seconds < 3) return { source: "insufficient" };
+  if (!ANALYSIS_API_BASE_URL) return { source: "fallback" };
+  const response = await fetch(`${ANALYSIS_API_BASE_URL.replace(/\/$/, "")}/session-feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(facts),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  if (data?.source === "solar" && typeof data.message === "string" && data.message.trim()) return data;
+  return { source: data?.source === "insufficient" ? "insufficient" : "fallback" };
+}
+
 export async function sendFrame({ blob, sessionId, mode, rubric, segment, signal }) {
   if (!ANALYSIS_API_BASE_URL) return null;
 

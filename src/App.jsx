@@ -16,6 +16,7 @@ import WelcomeModal from "./components/WelcomeModal";
 import { MODES } from "./config/modes";
 import { useCamera } from "./hooks/useCamera";
 import { useFrameSampler } from "./hooks/useFrameSampler";
+import { requestSessionFeedback } from "./services/AnalysisClient";
 import { getRemoteEventKey, stableDisplay, toTemporalState } from "./services/RemoteAnalysisProvider";
 import { evaluateContext } from "./utils/evaluator";
 
@@ -35,6 +36,7 @@ function saveGuideOptOutCookie() {
 const INITIAL_TEMPORAL_STATE = { status: null, eventLabel: null, coaching: null };
 
 const initialStats = () => ({ caution: 0, warning: 0, recovered: 0, eventCounts: {}, issueDurations: {} });
+const initialMeasurements = () => ({ lastValidAt: null, validMs: 0, observations: {}, displayed: new Map() });
 
 const measurementGuides = {
   ear_or_shoulder_not_visible: "얼굴과 어깨가 함께 보이도록 카메라를 맞춰 주세요.",
@@ -72,6 +74,9 @@ function App() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [temporal, setTemporal] = useState(INITIAL_TEMPORAL_STATE);
   const [stats, setStats] = useState(initialStats);
+  const [sessionFeedback, setSessionFeedback] = useState(null);
+  const feedbackRequest = useRef(null);
+  const measurements = useRef(initialMeasurements());
   const [logs, setLogs] = useState([]);
   const [liveAnalysis, setRemoteAnalysis] = useState(null);
   const [resultCueVisible, setResultCueVisible] = useState(false);
@@ -85,6 +90,7 @@ function App() {
   const lastIssueRef = useRef(null);
 
   const clearMeasurement = useCallback((reason) => {
+    measurements.current.lastValidAt = null;
     setRemoteAnalysis(reason ? { measurementStatus: "offline", measurementReason: reason } : null);
     setTemporal({ ...INITIAL_TEMPORAL_STATE, status: null });
     remoteStatusRef.current = null;
@@ -114,7 +120,7 @@ function App() {
   const coaching = temporal.coaching;
   const coachingContext = measurementNotice?.title ?? temporal.activeEventId ?? temporal.status ?? "waiting";
   const coachingScope = liveAnalysis?.measurementStatus === "offline" ? liveAnalysis.measurementReason : sessionState;
-  const coachingLabel = !measurementNotice && coaching?.source === "solar" ? "SOLAR 응답" : "기본 안내";
+  const coachingSource = !measurementNotice && coaching?.source === "solar" ? "solar" : "fallback";
   const coachingMessage = sessionState === "ended"
     ? "이번 세션이 끝났습니다."
     : sessionState === "paused" ? "분석을 잠시 멈췄습니다."
@@ -130,6 +136,10 @@ function App() {
   }, []);
 
   const resetSession = useCallback((state = "idle") => {
+    feedbackRequest.current?.abort();
+    feedbackRequest.current = null;
+    measurements.current = initialMeasurements();
+    setSessionFeedback(null);
     setSessionState(state);
     setElapsedMs(0);
     setTemporal({ ...INITIAL_TEMPORAL_STATE });
@@ -145,8 +155,23 @@ function App() {
     lastIssueRef.current = null;
   }, []);
 
+  const recordDisplayed = useCallback((eventId, source) => {
+    const displayed = measurements.current.displayed;
+    if (displayed.get(eventId) !== "solar") displayed.set(eventId, source);
+  }, []);
+
   const applyRemoteAnalysis = useCallback((result) => {
     if (sessionState !== "running" || result.sessionId !== frameSessionId) return;
+    const measured = measurements.current;
+    const now = performance.now();
+    if (result.measurementStatus === "valid") {
+      if (measured.lastValidAt !== null && now - measured.lastValidAt <= 1000) {
+        measured.validMs += now - measured.lastValidAt;
+      }
+      measured.lastValidAt = now;
+    } else {
+      measured.lastValidAt = null;
+    }
     const raw = toTemporalState(result, rawTemporalRef.current);
     rawTemporalRef.current = raw;
     displayRef.current = stableDisplay(displayRef.current, { ...result, temporal: raw }, performance.now());
@@ -174,6 +199,8 @@ function App() {
     const eventKey = getRemoteEventKey(result);
     if (eventKey && !remoteEventKeysRef.current.has(eventKey)) {
       remoteEventKeysRef.current.add(eventKey);
+      const observation = result.event.metrics.observation;
+      if (observation) measured.observations[observation] = (measured.observations[observation] ?? 0) + 1;
       addLog(result.state, `자세 변화 · ${result.event.type}`);
     }
     const previousIssue = lastIssueRef.current;
@@ -225,6 +252,26 @@ function App() {
   const changeRubric = (nextRubric) => { if (nextRubric !== rubric) { setRubric(nextRubric); resetSession(); } };
   const startSession = () => { setFrameSessionId(crypto.randomUUID()); resetSession("running"); addLog("세션", `분석 시작 · ${mode.label}${modeId === "interview" ? ` · 기준 ${rubric}` : ""}`); };
   const endSession = () => {
+    if (feedbackRequest.current) return;
+    const controller = new AbortController();
+    feedbackRequest.current = controller;
+    const { validMs, observations, displayed } = measurements.current;
+    const displayedCount = displayed.size;
+    const solarCount = [...displayed.values()].filter(source => source === "solar").length;
+    const facts = {
+      mode: modeId, rubric: modeId === "interview" ? rubric : null,
+      elapsed_seconds: Math.round(elapsedMs / 1000), measured_seconds: Math.floor(validMs / 100) / 10,
+      caution: stats.caution, warning: stats.warning, recovered: stats.recovered,
+      issues: Object.fromEntries(Object.entries(stats.eventCounts).map(([issue, episodes]) =>
+        [issue, { episodes, seconds: Math.round(stats.issueDurations[issue] / 100) / 10 }])),
+      observations: { ...observations },
+    };
+    setSessionFeedback({ source: "loading", displayedCount, solarCount });
+    requestSessionFeedback(facts, controller.signal)
+      .catch(() => ({ source: "fallback" }))
+      .then(feedback => {
+        if (!controller.signal.aborted) setSessionFeedback({ ...feedback, displayedCount, solarCount });
+      });
     setSessionState("ended");
     clearMeasurement();
     setResultCueVisible(true);
@@ -280,17 +327,17 @@ function App() {
               <StatusPanel temporal={temporal} evaluation={evaluation} measurementTitle={measurementNotice?.title} />
               <FeaturePanel featurePacket={featurePacket} evaluation={evaluation} mode={mode} />
               <CoachingPanel key={`${modeId}/${rubric}/${frameSessionId}/${coachingScope}/${coachingContext}`}
-                label={coachingLabel} message={coachingMessage} />
+                source={coachingSource} message={coachingMessage} eventId={!measurementNotice && coaching ? temporal.activeEventId : null} onDisplay={recordDisplayed} />
             </aside>
           </div>
 
           <ControlPanel sessionState={sessionState} elapsedMs={elapsedMs} stats={stats} cameraReady={cameraPermission === "granted"} onStart={startSession} onPause={() => { setSessionState("paused"); clearMeasurement(); addLog("세션", "분석 일시정지"); }} onResume={() => { setSessionState("running"); addLog("세션", "분석 계속"); }} onEnd={endSession} />
 
           <div className="support-grid"><EventLog logs={logs} defaultOpen={sessionState === "ended"} /></div>
-          <footer><span>PostureMate · 영상 저장 안 함</span><p>실제 카메라로 연습하면 JPEG를 분석 서버로 보냅니다. SOLAR 코칭에는 자세 이벤트의 관찰값만 사용합니다.</p></footer>
+          <footer><span>PostureMate · 영상 저장 안 함</span><p>카메라 프레임은 분석 서버로 보냅니다. SOLAR는 자세 관찰값과 세션 집계로 코칭을 작성합니다.</p></footer>
         </main>
 
-        {sessionState === "ended" && <section ref={resultRef} id="analysis-result" className="analysis-result-section" aria-label="분석 결과"><SessionSummary mode={mode} rubric={rubric} elapsedMs={elapsedMs} stats={stats} logs={logs} coachingLabel={coachingLabel} coachingMessage={coachingMessage} onRestart={() => resetSession("idle")} /></section>}
+        {sessionState === "ended" && <section ref={resultRef} id="analysis-result" className="analysis-result-section" aria-label="분석 결과"><SessionSummary mode={mode} rubric={rubric} elapsedMs={elapsedMs} stats={stats} logs={logs} feedback={sessionFeedback} onRestart={() => resetSession("idle")} /></section>}
         {sessionState === "ended" && <button className={`result-scroll-cue ${resultCueVisible ? "visible" : "hidden"}`} type="button" aria-controls="analysis-result" onClick={scrollToResult}><span className="result-scroll-cue-content"><b>분석 결과 보기</b><i aria-hidden="true">↓</i></span></button>}
       </>}
     </div>
