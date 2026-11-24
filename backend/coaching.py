@@ -134,7 +134,8 @@ class Coaching:
                 return None
             self.event_id = event["event_id"]
             self.severity = state
-            bucket = (event["mode"], event["rubric"], event["type"], event["severity"])
+            bucket = (event["mode"], event["rubric"], event["type"],
+                      event["metrics"].get("observation"), event["severity"])
             now = asyncio.get_running_loop().time()
             key = os.getenv("UPSTAGE_API_KEY", saved_key)
             if key and now - self.last_call.get(bucket, -float("inf")) >= COOLDOWN:

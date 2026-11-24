@@ -204,6 +204,19 @@ class NeckCoachingTests(unittest.IsolatedAsyncioTestCase):
         await tick(61, "WARNING", {**event, "event_id": "c"})
         self.assertEqual(len(self.calls), 2)
 
+    async def test_cooldown_distinguishes_observations_within_one_neck_event_type(self):
+        self.release.set()
+        manager = Coaching()
+        for event_id, observation in [("a", "head_forward"), ("b", "head_tilt"), ("c", "head_forward")]:
+            event = {"event_id": event_id, "mode": "neck", "rubric": None,
+                     "type": "forward_head_proxy", "severity": "warning", "duration_sec": 5,
+                     "metrics": {"observation": observation}}
+            manager.frame(app.state.solar, "WARNING", event)
+            await asyncio.sleep(0)
+        requested = [json.loads(json.loads(req.content)["messages"][-1]["content"])["metrics"]["observation"]
+                     for req in self.calls]
+        self.assertEqual(requested, ["head_forward", "head_tilt"])
+
     async def test_completed_result_is_discarded_if_mode_changes_before_delivery(self):
         await self.caution()
         self.release.set()

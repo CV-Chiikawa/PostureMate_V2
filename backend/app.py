@@ -16,6 +16,7 @@ from PIL import Image, UnidentifiedImageError
 from backend.coaching import Coaching
 from backend.landmarker import Landmarker
 from backend.pose import PoseSession
+from backend.session_feedback import SessionFacts, session_feedback
 from backend.solar_credentials import read_saved_key
 
 MAX_FRAME_BYTES = 5 * 1024 * 1024
@@ -81,6 +82,12 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"ok": True, "service": "posturemate", "analysis_source": "mediapipe", "sources": ["mediapipe"]}
+
+
+@app.post("/session-feedback")
+async def summarize_session(facts: SessionFacts, request: Request):
+    key = os.getenv("UPSTAGE_API_KEY", request.app.state.saved_solar_key)
+    return await session_feedback(request.app.state.solar, key, facts)
 
 
 @app.post("/process-frame")
